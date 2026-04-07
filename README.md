@@ -55,7 +55,7 @@ The working path was to mirror Samsung's own updater more closely and send firmw
 - firmware commit opcode `0x10`
 - `nsid = 0`
 - transfer size `0x4000`
-- commit slot `2` by default
+- commit slot selection controlled by `--slot`
 
 ## Requirements
 
@@ -168,7 +168,16 @@ python3 fumagican.py flash-existing \
   --payload ./chosen.bin
 ```
 
-By default the script commits to slot `2`. You can override that with `--slot` if your controller needs something else.
+By default the script uses `--slot auto`, which tries slot `1` first and then retries with slot `2` if slot `1` fails.
+
+If you want to force a specific slot:
+
+```bash
+python3 fumagican.py auto \
+  --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso \
+  --device /dev/nvme0 \
+  --slot 2
+```
 
 ### Manual mode without ISO
 
@@ -196,6 +205,7 @@ The script logs the major steps in plain language, for example:
 - decrypted payload
 - started firmware download
 - committed firmware
+- retried with another slot when `--slot auto` is used
 
 ## How image selection works
 
@@ -256,6 +266,28 @@ This script is intended for official Samsung firmware packages only.
 It does not prove that every package is safe for every Samsung model or revision. It reproduces the selection and flashing path that matched the tested Samsung updater behavior.
 
 Flashing SSD firmware is inherently risky. If you do not understand the package you are sending to the controller, do not run the flashing step.
+
+## Slot troubleshooting
+
+If flashing behaves differently than expected, inspect the controller firmware slot state:
+
+```bash
+nvme fw-log /dev/nvme0
+nvme id-ctrl -H /dev/nvme0
+```
+
+Useful fields:
+
+- `afi`: currently active firmware slot
+- `frs1`, `frs2`, `frs3`: firmware revisions stored in slots
+- `frmw`: number of supported slots and whether slot 1 is read-only or read/write
+
+Recommended approach:
+
+- start with the default `--slot auto`
+- if needed, force a specific slot with `--slot 1` or `--slot 2`
+- if slot 1 is active and writable, forcing slot 1 may be the closest match to the original Samsung updater behavior
+- if slot 1 behaves badly on your controller, try slot 2 explicitly
 
 ## Tested result
 

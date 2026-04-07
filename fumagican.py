@@ -51,6 +51,10 @@ class HelpFormatter(argparse.RawDescriptionHelpFormatter):
     pass
 
 
+class FlashError(Exception):
+    pass
+
+
 @dataclass
 class ResolvedSource:
     fumagician: Path
@@ -137,7 +141,12 @@ def add_flash_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_XFER,
         help=f"Chunk size for firmware download (default: {DEFAULT_XFER})",
     )
-    flash.add_argument("--slot", type=int, default=2, help="Firmware slot for commit (default: 2)")
+    flash.add_argument(
+        "--slot",
+        default="auto",
+        metavar="SLOT",
+        help="Commit slot: 1, 2, or auto (default: auto)",
+    )
     flash.add_argument("--action", type=int, default=1, help="Firmware commit action (default: 1)")
     flash.add_argument("--dry-run", action="store_true", help="Print commands without sending them")
 
@@ -149,6 +158,26 @@ def fail(message: str) -> NoReturn:
 
 def log(message: str) -> None:
     print(f"[*] {message}")
+
+
+def parse_slot_value(value: str) -> str | int:
+    lowered = value.strip().lower()
+    if lowered == "auto":
+        return "auto"
+    try:
+        slot = int(lowered, 10)
+    except ValueError:
+        fail(f"invalid --slot value {value!r}; expected auto, 1, or 2")
+    if slot <= 0:
+        fail("--slot must be a positive integer or 'auto'")
+    return slot
+
+
+def resolve_slot_candidates(raw_slot: str) -> list[int]:
+    parsed = parse_slot_value(raw_slot)
+    if parsed == "auto":
+        return [1, 2]
+    return [parsed]
 
 
 def run(cmd: list[str], *, input_data: bytes | None = None, dry_run: bool = False) -> subprocess.CompletedProcess[bytes]:
@@ -589,7 +618,7 @@ def passthru_fw_download(device: str, payload: Path, xfer: int, dry_run: bool) -
                 run(cmd, dry_run=dry_run)
             except subprocess.CalledProcessError as exc:
                 stderr = exc.stderr.decode("utf-8", "ignore").strip()
-                fail(stderr or f"firmware download failed at offset {offset:#x}")
+                raise FlashError(stderr or f"firmware download failed at offset {offset:#x}")
 
             if index == total_chunks or index == 1 or index % 16 == 0:
                 log(f"download chunk {index}/{total_chunks}")
@@ -610,7 +639,7 @@ def passthru_fw_commit(device: str, slot: int, action: int, dry_run: bool) -> No
         run(cmd, dry_run=dry_run)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode("utf-8", "ignore").strip()
-        fail(stderr or "firmware commit failed")
+        raise FlashError(stderr or "firmware commit failed")
 
 
 def save_payload_temporarily(payload: bytes) -> tempfile.NamedTemporaryFile:
@@ -619,6 +648,32 @@ def save_payload_temporarily(payload: bytes) -> tempfile.NamedTemporaryFile:
     tmp.flush()
     tmp.close()
     return tmp
+
+
+def flash_payload(device: str, payload_path: Path, xfer: int, slot_value: str, action: int, dry_run: bool) -> None:
+    slots = resolve_slot_candidates(slot_value)
+
+    if len(slots) == 1:
+        slot = slots[0]
+        log(f"flashing with slot {slot}")
+        passthru_fw_download(device, payload_path, xfer, dry_run)
+        passthru_fw_commit(device, slot, action, dry_run)
+        return
+
+    errors: list[str] = []
+    for slot in slots:
+        log(f"flashing with auto slot candidate {slot}")
+        try:
+            passthru_fw_download(device, payload_path, xfer, dry_run)
+            passthru_fw_commit(device, slot, action, dry_run)
+            log(f"slot {slot} succeeded")
+            return
+        except FlashError as exc:
+            message = str(exc)
+            errors.append(f"slot {slot}: {message}")
+            log(f"slot {slot} failed: {message}")
+
+    fail("all slot candidates failed: " + "; ".join(errors))
 
 
 def do_extract(args: argparse.Namespace) -> tuple[str, bytes]:
@@ -677,8 +732,7 @@ def command_auto(args: argparse.Namespace) -> None:
 
     try:
         log(f"flashing payload: {payload_path}")
-        passthru_fw_download(args.device, payload_path, args.xfer, args.dry_run)
-        passthru_fw_commit(args.device, args.slot, args.action, args.dry_run)
+        flash_payload(args.device, payload_path, args.xfer, args.slot, args.action, args.dry_run)
         log(f"done: {inner_name}")
     finally:
         if temp_path and temp_path.exists():
@@ -695,8 +749,7 @@ def command_flash_existing(args: argparse.Namespace) -> None:
     if not args.payload.exists():
         fail(f"payload not found: {args.payload}")
     log(f"flashing existing payload: {args.payload}")
-    passthru_fw_download(args.device, args.payload, args.xfer, args.dry_run)
-    passthru_fw_commit(args.device, args.slot, args.action, args.dry_run)
+    flash_payload(args.device, args.payload, args.xfer, args.slot, args.action, args.dry_run)
     log("done")
 
 
