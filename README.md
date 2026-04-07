@@ -60,10 +60,11 @@ The working path was to mirror Samsung's own updater more closely and send firmw
 
 - Python 3
 - `nvme-cli`
-- `bsdtar` if you want ISO mode
 - either:
   - `pycryptodome`, or
   - `openssl`
+
+The script does not require `bsdtar`, `7z`, or other archive tools for ISO mode. It includes its own minimal ISO9660 reader and `cpio newc` parser.
 
 ## Quick start
 

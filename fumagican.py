@@ -27,6 +27,7 @@ FW_DOWNLOAD_OPCODE = "0x11"
 FW_COMMIT_OPCODE = "0x10"
 DEFAULT_XFER = 0x4000
 ISO_INITRD_NAME = "initrd"
+ISO_SECTOR_SIZE = 2048
 DESCRIPTION = "Extract and flash official Samsung NVMe firmware packages."
 EPILOG = """Examples:
   python3 fumagican.py auto --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso --device /dev/nvme0
@@ -245,22 +246,141 @@ def extract_key(fumagician: Path, encrypted_firmware: Path) -> bytes:
     fail("could not verify any key candidate against firmware header")
 
 
-def list_archive_entries(archive: Path) -> list[str]:
-    bsdtar = require_tool("bsdtar")
-    try:
-        proc = run([bsdtar, "-tf", str(archive)])
-    except subprocess.CalledProcessError as exc:
-        fail(exc.stderr.decode("utf-8", "ignore").strip() or f"failed to list archive {archive}")
-    return [line for line in proc.stdout.decode("utf-8", "ignore").splitlines() if line]
+def normalize_iso_name(name: str) -> str:
+    return name.split(";", 1)[0].rstrip(".").lower()
 
 
-def extract_archive_member(archive: Path, member: str) -> bytes:
-    bsdtar = require_tool("bsdtar")
-    try:
-        proc = run([bsdtar, "-xOf", str(archive), member])
-    except subprocess.CalledProcessError as exc:
-        fail(exc.stderr.decode("utf-8", "ignore").strip() or f"failed to extract {member} from {archive}")
-    return proc.stdout
+def parse_iso_dir_record(record: bytes) -> dict[str, object]:
+    if not record:
+        fail("empty ISO directory record")
+
+    extent = int.from_bytes(record[2:6], "little")
+    size = int.from_bytes(record[10:14], "little")
+    flags = record[25]
+    name_len = record[32]
+    raw_name = record[33 : 33 + name_len]
+
+    if raw_name == b"\x00":
+        name = "."
+    elif raw_name == b"\x01":
+        name = ".."
+    else:
+        name = raw_name.decode("ascii", "ignore")
+
+    return {
+        "name": name,
+        "extent": extent,
+        "size": size,
+        "is_dir": bool(flags & 0x02),
+    }
+
+
+def iter_iso_dir_entries(iso_data: bytes, extent: int, size: int) -> list[dict[str, object]]:
+    start = extent * ISO_SECTOR_SIZE
+    end = start + size
+    if end > len(iso_data):
+        fail("ISO directory extent exceeds file size")
+
+    entries: list[dict[str, object]] = []
+    offset = start
+
+    while offset < end:
+        record_len = iso_data[offset]
+        if record_len == 0:
+            next_sector = ((offset // ISO_SECTOR_SIZE) + 1) * ISO_SECTOR_SIZE
+            if next_sector <= offset:
+                break
+            offset = next_sector
+            continue
+
+        record = iso_data[offset : offset + record_len]
+        entry = parse_iso_dir_record(record)
+        if entry["name"] not in (".", ".."):
+            entries.append(entry)
+        offset += record_len
+
+    return entries
+
+
+def get_iso_root_record(iso_data: bytes) -> dict[str, object]:
+    for sector in range(16, 64):
+        start = sector * ISO_SECTOR_SIZE
+        pvd = iso_data[start : start + ISO_SECTOR_SIZE]
+        if len(pvd) < ISO_SECTOR_SIZE:
+            break
+        desc_type = pvd[0]
+        ident = pvd[1:6]
+        if ident != b"CD001":
+            continue
+        if desc_type == 1:
+            root_len = pvd[156]
+            return parse_iso_dir_record(pvd[156 : 156 + root_len])
+        if desc_type == 255:
+            break
+    fail("could not locate ISO9660 primary volume descriptor")
+
+
+def extract_iso_member(iso_path: Path, member: str) -> bytes:
+    iso_data = iso_path.read_bytes()
+    root = get_iso_root_record(iso_data)
+    current = root
+
+    for part in [chunk for chunk in member.split("/") if chunk and chunk != "."]:
+        entries = iter_iso_dir_entries(
+            iso_data,
+            int(current["extent"]),
+            int(current["size"]),
+        )
+        wanted = normalize_iso_name(part)
+        match = next((entry for entry in entries if normalize_iso_name(str(entry["name"])) == wanted), None)
+        if match is None:
+            fail(f"could not find {member!r} inside ISO")
+        current = match
+
+    start = int(current["extent"]) * ISO_SECTOR_SIZE
+    end = start + int(current["size"])
+    if end > len(iso_data):
+        fail(f"ISO member {member!r} exceeds file size")
+    return iso_data[start:end]
+
+
+def iter_cpio_entries(data: bytes) -> list[tuple[str, bytes]]:
+    entries: list[tuple[str, bytes]] = []
+    offset = 0
+
+    while offset + 110 <= len(data):
+        header = data[offset : offset + 110]
+        magic = header[:6]
+        if magic != b"070701":
+            fail("unsupported initrd format: expected cpio newc")
+
+        try:
+            filesize = int(header[54:62], 16)
+            namesize = int(header[94:102], 16)
+        except ValueError:
+            fail("invalid cpio header")
+
+        name_start = offset + 110
+        name_end = name_start + namesize
+        if name_end > len(data):
+            fail("cpio name exceeds archive size")
+
+        raw_name = data[name_start:name_end]
+        name = raw_name[:-1].decode("utf-8", "ignore") if raw_name.endswith(b"\x00") else raw_name.decode("utf-8", "ignore")
+        data_start = (name_end + 3) & ~3
+        data_end = data_start + filesize
+        if data_end > len(data):
+            fail(f"cpio member {name!r} exceeds archive size")
+
+        if name == "TRAILER!!!":
+            break
+
+        entries.append((name, data[data_start:data_end]))
+        offset = (data_end + 3) & ~3
+
+    if not entries:
+        fail("no files found in initrd cpio archive")
+    return entries
 
 
 def extract_from_iso(iso_path: Path) -> ResolvedSource:
@@ -268,12 +388,7 @@ def extract_from_iso(iso_path: Path) -> ResolvedSource:
         fail(f"ISO not found: {iso_path}")
 
     log(f"opened ISO: {iso_path}")
-    iso_entries = list_archive_entries(iso_path)
-    initrd_member = next((entry for entry in iso_entries if Path(entry).name == ISO_INITRD_NAME), None)
-    if not initrd_member:
-        fail(f"could not find {ISO_INITRD_NAME!r} inside ISO")
-
-    initrd_gzip = extract_archive_member(iso_path, initrd_member)
+    initrd_gzip = extract_iso_member(iso_path, ISO_INITRD_NAME)
     log(f"extracted initrd: {len(initrd_gzip):,} bytes")
     try:
         initrd_cpio = gzip.decompress(initrd_gzip)
@@ -283,17 +398,16 @@ def extract_from_iso(iso_path: Path) -> ResolvedSource:
 
     tempdir = tempfile.TemporaryDirectory(prefix="fumagican-iso-")
     temp_root = Path(tempdir.name)
-    cpio_path = temp_root / "initrd.cpio"
-    cpio_path.write_bytes(initrd_cpio)
+    cpio_entries = iter_cpio_entries(initrd_cpio)
+    cpio_map = {name: payload for name, payload in cpio_entries}
 
-    cpio_entries = list_archive_entries(cpio_path)
-    fumagician_member = next((entry for entry in cpio_entries if entry.endswith("/fumagician/fumagician")), None)
+    fumagician_member = next((name for name in cpio_map if name.endswith("/fumagician/fumagician")), None)
     if not fumagician_member:
         tempdir.cleanup()
         fail("could not locate fumagician inside initrd")
 
-    enc_members = [entry for entry in cpio_entries if entry.endswith(".enc") and "/fumagician/" in entry]
-    outer_candidates = [entry for entry in enc_members if Path(entry).name.upper() != "DSRD.ENC"]
+    enc_members = [name for name in cpio_map if name.endswith(".enc") and "/fumagician/" in name]
+    outer_candidates = [name for name in enc_members if Path(name).name.upper() != "DSRD.ENC"]
     if not outer_candidates:
         tempdir.cleanup()
         fail("could not locate outer firmware .enc inside initrd")
@@ -301,15 +415,15 @@ def extract_from_iso(iso_path: Path) -> ResolvedSource:
     if len(outer_candidates) == 1:
         firmware_member = outer_candidates[0]
     else:
-        firmware_member = max(outer_candidates, key=lambda entry: len(extract_archive_member(cpio_path, entry)))
+        firmware_member = max(outer_candidates, key=lambda name: len(cpio_map[name]))
 
     log(f"located fumagician: {fumagician_member}")
     log(f"located outer firmware package: {firmware_member}")
 
     fumagician_path = temp_root / Path(fumagician_member).name
     firmware_path = temp_root / Path(firmware_member).name
-    fumagician_path.write_bytes(extract_archive_member(cpio_path, fumagician_member))
-    firmware_path.write_bytes(extract_archive_member(cpio_path, firmware_member))
+    fumagician_path.write_bytes(cpio_map[fumagician_member])
+    firmware_path.write_bytes(cpio_map[firmware_member])
 
     log(f"extracted bundled files to temporary workspace: {temp_root}")
     return ResolvedSource(
