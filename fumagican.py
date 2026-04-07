@@ -1,37 +1,5 @@
 #!/usr/bin/env python3
-"""
-Samsung NVMe firmware helper.
-
-Primary workflow:
-  - open Samsung bootable ISO
-  - extract `fumagician` and the outer `.enc` package from `initrd`
-  - extract the AES-256 key from `fumagician`
-  - decrypt the outer package
-  - read Samsung `ReadBuffer` from the target NVMe device
-  - select the matching inner firmware image
-  - decrypt the selected payload
-  - flash it via raw `nvme admin-passthru`
-
-Supported workflows:
-  1. Fully automatic from ISO
-  2. Extract-only from ISO or from already extracted files
-  3. Flash an already extracted `.bin`
-
-Examples:
-
-  python3 fumagican.py auto \
-      --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso \
-      --device /dev/nvme0
-
-  python3 fumagican.py extract \
-      --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso \
-      --device /dev/nvme0 \
-      --output ./chosen.bin
-
-  python3 fumagican.py flash-existing \
-      --device /dev/nvme0 \
-      --payload ./chosen.bin
-"""
+"""Samsung NVMe firmware helper."""
 
 from __future__ import annotations
 
@@ -59,6 +27,27 @@ FW_DOWNLOAD_OPCODE = "0x11"
 FW_COMMIT_OPCODE = "0x10"
 DEFAULT_XFER = 0x4000
 ISO_INITRD_NAME = "initrd"
+DESCRIPTION = "Extract and flash official Samsung NVMe firmware packages."
+EPILOG = """Examples:
+  python3 fumagican.py auto --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso --device /dev/nvme0
+  python3 fumagican.py auto --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso --device /dev/nvme0 --dry-run
+  python3 fumagican.py extract --iso ./Samsung_SSD_990_PRO_8B2QJXD7.iso --device /dev/nvme0 --output ./chosen.bin
+  python3 fumagican.py flash-existing --device /dev/nvme0 --payload ./chosen.bin
+"""
+
+AUTO_DESCRIPTION = (
+    "Open a Samsung updater ISO or extracted firmware files, select the matching "
+    "inner payload for the target SSD, and flash it."
+)
+EXTRACT_DESCRIPTION = (
+    "Open a Samsung updater ISO or extracted firmware files, select the matching "
+    "inner payload, and save it without flashing."
+)
+FLASH_DESCRIPTION = "Flash an already extracted Samsung firmware payload."
+
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    pass
 
 
 @dataclass
@@ -74,10 +63,20 @@ class ResolvedSource:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="fumagican.py",
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=HelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True, title="commands")
 
-    auto = subparsers.add_parser("auto", help="Extract, select, and flash")
+    auto = subparsers.add_parser(
+        "auto",
+        help="extract, select, and flash",
+        description=AUTO_DESCRIPTION,
+        formatter_class=HelpFormatter,
+    )
     add_flow_args(auto)
     add_flash_args(auto)
     auto.add_argument(
@@ -86,7 +85,12 @@ def parse_args() -> argparse.Namespace:
         help="Optionally save the selected payload before flashing",
     )
 
-    extract = subparsers.add_parser("extract", help="Extract and save selected payload")
+    extract = subparsers.add_parser(
+        "extract",
+        help="extract and save selected payload",
+        description=EXTRACT_DESCRIPTION,
+        formatter_class=HelpFormatter,
+    )
     add_flow_args(extract)
     extract.add_argument(
         "--output",
@@ -94,7 +98,12 @@ def parse_args() -> argparse.Namespace:
         help="Where to save the selected payload; default is <inner>.bin in cwd",
     )
 
-    flash = subparsers.add_parser("flash-existing", help="Flash an already extracted payload")
+    flash = subparsers.add_parser(
+        "flash-existing",
+        help="flash an already extracted payload",
+        description=FLASH_DESCRIPTION,
+        formatter_class=HelpFormatter,
+    )
     flash.add_argument("--device", required=True, help="NVMe controller, e.g. /dev/nvme0")
     flash.add_argument("--payload", required=True, type=Path, help="Existing decrypted .bin payload")
     add_flash_args(flash)
@@ -103,13 +112,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def add_flow_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--iso", type=Path, help="Samsung bootable ISO image")
-    parser.add_argument("--fumagician", type=Path, help="Path to Samsung fumagician binary")
-    parser.add_argument("--firmware", type=Path, help="Path to outer Samsung .enc file")
-    parser.add_argument("--device", help="NVMe controller, e.g. /dev/nvme0")
-    parser.add_argument("--readbuffer", type=Path, help="Existing 4096-byte ReadBuffer dump")
-    parser.add_argument("--selector", help="Manual selector override, e.g. 3")
-    parser.add_argument(
+    source = parser.add_argument_group("firmware source")
+    source.add_argument("--iso", type=Path, help="Samsung bootable ISO image")
+    source.add_argument("--fumagician", type=Path, help="Path to extracted Samsung fumagician binary")
+    source.add_argument("--firmware", type=Path, help="Path to extracted outer Samsung .enc file")
+
+    selection = parser.add_argument_group("device selection")
+    selection.add_argument("--device", help="NVMe controller, e.g. /dev/nvme0")
+    selection.add_argument("--readbuffer", type=Path, help="Existing 4096-byte ReadBuffer dump")
+    selection.add_argument("--selector", help="Manual selector override, e.g. 3")
+    selection.add_argument(
         "--save-readbuffer",
         type=Path,
         help="Save freshly read ReadBuffer dump to this path",
@@ -117,10 +129,16 @@ def add_flow_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_flash_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--xfer", type=int, default=DEFAULT_XFER, help="Chunk size for firmware download")
-    parser.add_argument("--slot", type=int, default=1, help="Firmware slot for commit")
-    parser.add_argument("--action", type=int, default=1, help="Firmware commit action")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without sending them")
+    flash = parser.add_argument_group("flash options")
+    flash.add_argument(
+        "--xfer",
+        type=int,
+        default=DEFAULT_XFER,
+        help=f"Chunk size for firmware download (default: {DEFAULT_XFER})",
+    )
+    flash.add_argument("--slot", type=int, default=1, help="Firmware slot for commit (default: 1)")
+    flash.add_argument("--action", type=int, default=1, help="Firmware commit action (default: 1)")
+    flash.add_argument("--dry-run", action="store_true", help="Print commands without sending them")
 
 
 def fail(message: str) -> NoReturn:
