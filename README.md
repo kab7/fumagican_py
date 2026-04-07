@@ -2,6 +2,8 @@
 
 `fumagican.py` extracts and flashes official Samsung NVMe firmware packages without booting Samsung's updater image and without manually running the bundled x86-only `fumagician`.
 
+It is especially useful on ARM64 and other non-`x86_64` systems, where Samsung's stock updater image and bundled tooling are awkward or impossible to run directly.
+
 It was built around Samsung 990 Pro packages, but the overall flow is generic for Samsung updater ISOs that:
 
 - keep the firmware files inside `initrd`
