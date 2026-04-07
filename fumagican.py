@@ -137,7 +137,7 @@ def add_flash_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_XFER,
         help=f"Chunk size for firmware download (default: {DEFAULT_XFER})",
     )
-    flash.add_argument("--slot", type=int, default=1, help="Firmware slot for commit (default: 1)")
+    flash.add_argument("--slot", type=int, default=2, help="Firmware slot for commit (default: 2)")
     flash.add_argument("--action", type=int, default=1, help="Firmware commit action (default: 1)")
     flash.add_argument("--dry-run", action="store_true", help="Print commands without sending them")
 

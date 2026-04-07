@@ -55,6 +55,7 @@ The working path was to mirror Samsung's own updater more closely and send firmw
 - firmware commit opcode `0x10`
 - `nsid = 0`
 - transfer size `0x4000`
+- commit slot `2` by default
 
 ## Requirements
 
@@ -166,6 +167,8 @@ python3 fumagican.py flash-existing \
   --device /dev/nvme0 \
   --payload ./chosen.bin
 ```
+
+By default the script commits to slot `2`. You can override that with `--slot` if your controller needs something else.
 
 ### Manual mode without ISO
 
