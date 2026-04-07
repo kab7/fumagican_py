@@ -116,6 +116,18 @@ python3 fumagican.py auto \
   --dry-run
 ```
 
+In `auto --dry-run` mode the script still:
+
+- opens the ISO
+- extracts the bundled files
+- reads `ReadBuffer`
+- selects the matching inner firmware
+- decrypts and saves the selected payload
+
+but it does not actually send firmware download or commit commands to the SSD.
+
+If `--output` is not specified, the payload is saved as `<inner>.bin` in the current directory.
+
 ### Save `ReadBuffer` while extracting
 
 ```bash

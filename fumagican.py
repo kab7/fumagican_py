@@ -533,6 +533,10 @@ def command_auto(args: argparse.Namespace) -> None:
     if args.output:
         write_output(args.output, payload)
         payload_path = args.output
+    elif args.dry_run:
+        payload_path = Path(f"{Path(inner_name).stem}.bin")
+        write_output(payload_path, payload)
+        log("dry run enabled: payload was extracted, but firmware commands will not be sent")
     else:
         tmp = save_payload_temporarily(payload)
         temp_path = Path(tmp.name)
