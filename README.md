@@ -109,7 +109,7 @@ python3 fumagican.py extract \
 
 ### Dry run
 
-Shows the exact `admin-passthru` commands without sending them.
+Runs the full selection and extraction flow, but does not actually send NVMe firmware download or commit commands.
 
 ```bash
 python3 fumagican.py auto \

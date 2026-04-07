@@ -148,7 +148,7 @@ def add_flash_args(parser: argparse.ArgumentParser) -> None:
         help="Commit slot: 1, 2, or auto (default: auto)",
     )
     flash.add_argument("--action", type=int, default=1, help="Firmware commit action (default: 1)")
-    flash.add_argument("--dry-run", action="store_true", help="Print commands without sending them")
+    flash.add_argument("--dry-run", action="store_true", help="Simulate flashing without sending NVMe firmware commands")
 
 
 def fail(message: str) -> NoReturn:
@@ -182,7 +182,6 @@ def resolve_slot_candidates(raw_slot: str) -> list[int]:
 
 def run(cmd: list[str], *, input_data: bytes | None = None, dry_run: bool = False) -> subprocess.CompletedProcess[bytes]:
     if dry_run:
-        print("+", " ".join(cmd))
         return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
     return subprocess.run(
@@ -583,6 +582,14 @@ def write_output(path: Path, payload: bytes) -> None:
     log(f"saved payload: {path}")
 
 
+def print_download_progress(index: int, total_chunks: int) -> None:
+    if index == 1:
+        print("[*] download progress: ", end="", flush=True)
+    print(".", end="", flush=True)
+    if index == total_chunks:
+        print(f" {total_chunks}/{total_chunks}", flush=True)
+
+
 def passthru_fw_download(device: str, payload: Path, xfer: int, dry_run: bool) -> None:
     data = payload.read_bytes()
     if xfer <= 0 or xfer % 4:
@@ -617,11 +624,12 @@ def passthru_fw_download(device: str, payload: Path, xfer: int, dry_run: bool) -
             try:
                 run(cmd, dry_run=dry_run)
             except subprocess.CalledProcessError as exc:
+                if index > 1:
+                    print(flush=True)
                 stderr = exc.stderr.decode("utf-8", "ignore").strip()
                 raise FlashError(stderr or f"firmware download failed at offset {offset:#x}")
 
-            if index == total_chunks or index == 1 or index % 16 == 0:
-                log(f"download chunk {index}/{total_chunks}")
+            print_download_progress(index, total_chunks)
 
 
 def passthru_fw_commit(device: str, slot: int, action: int, dry_run: bool) -> None:
